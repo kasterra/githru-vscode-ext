@@ -1,11 +1,16 @@
 import { AnalysisEngine } from "@githru-vscode-ext/analysis-engine";
 import * as vscode from "vscode";
-import { COMMAND_LAUNCH } from "./commands";
+import { COMMAND_GET_ACCESS_TOKEN, COMMAND_LAUNCH } from "./commands";
 import { findGit, getBaseBranchName, getBranchNames, getGitConfig, getGitLog, getRepo } from "./utils/git.util";
 import { mapClusterNodesFrom } from "./utils/csm.mapper";
 import WebviewLoader from "./webview-loader";
 
 let myStatusBarItem: vscode.StatusBarItem;
+
+const getGithubToken = () : string | undefined => {
+    const configuration = vscode.workspace.getConfiguration();
+    return configuration.get("githru.github.token");
+}
 
 export function activate(context: vscode.ExtensionContext) {
     const { subscriptions, extensionUri, extensionPath } = context;
@@ -20,25 +25,54 @@ export function activate(context: vscode.ExtensionContext) {
             throw new Error("Cannot find current workspace path");
         }
 
-        const configuration = vscode.workspace.getConfiguration();
-        const githubToken: string | undefined = configuration.get("githru.github.token");
+        const githubToken: string | undefined = await getGithubToken();
         console.log("GitHubToken: ", githubToken);
-        const gitLog = await getGitLog(gitPath, currentWorkspacePath);
-        const gitConfig = await getGitConfig(gitPath, currentWorkspacePath, "origin");
-        const { owner, repo } = getRepo(gitConfig);
-        const branchNames = await getBranchNames(gitPath, currentWorkspacePath);
-        const baseBranchName = getBaseBranchName(branchNames);
 
-        const engine = new AnalysisEngine({ isDebugMode: true, gitLog, owner, repo, auth: githubToken, baseBranchName });
-        const csmDict = await engine.analyzeGit();
-        const clusterNodes = mapClusterNodesFrom(csmDict);
-        const data = JSON.stringify(clusterNodes);
+        const fetchClusterNodes = async () => {
+            const gitLog = await getGitLog(gitPath, currentWorkspacePath);
+            const gitConfig = await getGitConfig(gitPath, currentWorkspacePath, "origin");
+            const { owner, repo } = getRepo(gitConfig);
+            const branchNames = await getBranchNames(gitPath, currentWorkspacePath);
+            const baseBranchName = getBaseBranchName(branchNames);
+            const engine = new AnalysisEngine({
+                isDebugMode: true,
+                gitLog,
+                owner,
+                repo,
+                auth: githubToken,
+                baseBranchName,
+            });
+            const csmDict = await engine.analyzeGit();
+            const clusterNodes = mapClusterNodesFrom(csmDict);
+            const data = JSON.stringify(clusterNodes);
+            return data;
+        };
+        const initialData = await fetchClusterNodes();
+        const webLoader = new WebviewLoader(extensionUri, extensionPath, initialData, fetchClusterNodes);
 
-        subscriptions.push(new WebviewLoader(extensionUri, extensionPath, data));
+        subscriptions.push(webLoader);
 
         vscode.window.showInformationMessage("Hello Githru");
     });
-    subscriptions.push(disposable);
+
+    const getAccessToken = vscode.commands.registerCommand(COMMAND_GET_ACCESS_TOKEN, async () => {
+        const config = vscode.workspace.getConfiguration()
+
+        const defaultGithubToken = await getGithubToken();
+
+        const newGithubToken = await vscode.window.showInputBox({
+            title: "Type or paste your Github access token value.",
+            placeHolder: "Type valid token here!",
+            value: defaultGithubToken ?? ''
+        });
+
+        if (!newGithubToken) 
+            throw new Error("Cannot get users' access token properly");
+
+        config.update('githru.github.token',newGithubToken, vscode.ConfigurationTarget.Global);
+    });
+
+    subscriptions.concat([disposable, getAccessToken]);
 
     myStatusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, -10);
     myStatusBarItem.text = "githru";
